@@ -1,0 +1,25 @@
+# Credential material and local environment
+.streamlit/secrets.toml
+**/secrets.toml
+*.json
+*.pem
+*.p12
+*.key
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+# Never publish downloaded business data, account lists, backups or compiled packages
+*.xlsx
+*.xls
+*.csv
+*.sqlite
+*.db
+*.zip
+*.log
+backups/
+backup/
+private/
