@@ -1,7 +1,7 @@
-"""Recipe images: suggestions from openly licensed Wikimedia Commons, overrides in Google Drive.
+"""Recipe images: Commons suggestions plus private GitHub image overrides.
 
 Images are NOT downloaded into the workbook. PO_Recipe_Images holds a recipe-name
-key, image URL or Drive file id, provenance, and attribution.
+key, image URL or repository asset path, provenance, and attribution.
 """
 from __future__ import annotations
 import html
@@ -109,44 +109,3 @@ def verify_upload(data, filename):
         ext = {'PNG': 'png', 'JPEG': 'jpg', 'WEBP': 'webp'}[img.format]
     return mime, re.sub(r'[^a-zA-Z0-9_.-]+', '_', filename.rsplit('.', 1)[0])[:90] + '.' + ext
 
-
-class GoogleDriveImages:
-    """Private images accessible to the service account; public sharing isn't required.
-
-    To upload, Google Drive API must be enabled, and the target folder must be
-    shared with the service account (Editor). Uploaded images remain private.
-    """
-    def __init__(self, credentials_dict):
-        from google.oauth2.service_account import Credentials
-        from google.auth.transport.requests import AuthorizedSession
-        creds = Credentials.from_service_account_info(credentials_dict, scopes=[
-            'https://www.googleapis.com/auth/drive',
-        ])
-        self.session = AuthorizedSession(creds)
-
-    def upload(self, folder_id, filename, data, mime):
-        if not folder_id or not re.fullmatch(r'[A-Za-z0-9_-]{8,}', str(folder_id)):
-            raise ValueError('Enter the target Google Drive folder ID under Admin Settings')
-        metadata = {'name': filename, 'parents': [folder_id]}
-        from requests_toolbelt.multipart.encoder import MultipartEncoder
-        mp = MultipartEncoder(fields={
-            'metadata': ('metadata', json.dumps(metadata), 'application/json; charset=UTF-8'),
-            'media': (filename, data, mime),
-        })
-        response = self.session.post('https://www.googleapis.com/upload/drive/v3/files',
-            params={'uploadType': 'multipart', 'fields': 'id,name', 'supportsAllDrives': 'true'},
-            data=mp, headers={'Content-Type': mp.content_type}, timeout=45)
-        if not response.ok:
-            raise RuntimeError(f'Drive upload failed ({response.status_code}). Enable Drive API and share the folder with your service-account email as Editor.')
-        image_id = response.json().get('id')
-        if not image_id:
-            raise RuntimeError('Drive upload returned no file ID')
-        return image_id
-
-    def read(self, file_id):
-        if not file_id:
-            return None
-        response = self.session.get('https://www.googleapis.com/drive/v3/files/' + quote(str(file_id), safe=''),
-            params={'alt': 'media','supportsAllDrives': 'true'}, timeout=25)
-        response.raise_for_status()
-        return response.content

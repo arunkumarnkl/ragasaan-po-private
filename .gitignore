@@ -1,18 +1,23 @@
-# Credential material and local environment
+# Secrets and private runtime credentials
 .streamlit/secrets.toml
 **/secrets.toml
-*.json
 *.pem
 *.p12
 *.key
 .env
 .env.*
+
+# Do not commit arbitrary JSON credentials; allow only app database JSON.
+*.json
+!database/
+!database/*.json
+
+# Temporary / generated files
 .venv/
 venv/
 __pycache__/
 .pytest_cache/
 *.pyc
-# Never publish downloaded business data, account lists, backups or compiled packages
 *.xlsx
 *.xls
 *.csv

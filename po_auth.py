@@ -1,4 +1,4 @@
-"""Password verification with legacy migration compatibility."""
+"""Hashed-password verification for the private GitHub user database."""
 import hashlib
 import hmac
 
@@ -13,7 +13,8 @@ def authenticate(username,password,users):
                 matches=hmac.compare_digest(attempt.hex(),digest)
             except (ValueError,TypeError):matches=False
         else:
-            matches=hmac.compare_digest(password,stored)
+            # No plaintext password authentication in the GitHub-only release.
+            matches=False
         if matches:return row
     return None
 

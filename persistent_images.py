@@ -1,57 +1,57 @@
-"""Persistent private image storage: Google Workspace Shared Drive or GCS bucket.
+"""Private image assets stored in the same GitHub repository as the application.
 
-Cloud Storage is optional, useful for personal Gmail accounts without Shared Drives.
-The metadata stays in existing Google Sheets fields; no schema migration is needed.
+Existing database field `drive_file_id` is kept for schema compatibility, but
+new values are asset paths (assets/recipes/...) rather than Google Drive IDs.
 """
 from __future__ import annotations
-from urllib.parse import quote, urlsplit
+from pathlib import Path
+from io import BytesIO
+from PIL import Image, ImageOps
 from uuid import uuid4
 import re
-from recipe_images import GoogleDriveImages
-
-_BUCKET_RE=re.compile(r'^[a-z0-9][a-z0-9._-]{2,221}[a-z0-9]$')
-
+from sheet_store import GitHubStore
 
 class PersistentImages:
-    def __init__(self,credentials,bucket=''):
-        self.credentials=dict(credentials)
-        self.bucket=str(bucket or '').strip()
-        if self.bucket and not _BUCKET_RE.fullmatch(self.bucket):
-            raise ValueError('Invalid Cloud Storage bucket name')
-
-    def _session(self):
-        from google.oauth2.service_account import Credentials
-        from google.auth.transport.requests import AuthorizedSession
-        creds=Credentials.from_service_account_info(self.credentials,scopes=[
-            'https://www.googleapis.com/auth/devstorage.read_write'])
-        return AuthorizedSession(creds)
+    def __init__(self,credentials,*,bucket=''):
+        self.store=GitHubStore(credentials['repo'],credentials['token'],credentials.get('branch','main'))
 
     def upload(self,folder_id,filename,data,mime):
-        if not self.bucket:
-            return GoogleDriveImages(self.credentials).upload(folder_id,filename,data,mime)
-        ext={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}.get(mime)
-        if ext is None:raise ValueError('Unsupported image MIME type')
-        # Unique object names avoid overwriting another user's upload.
-        name=f'ragasaan/{uuid4().hex}.{ext}'
-        res=self._session().post(
-            f'https://storage.googleapis.com/upload/storage/v1/b/{quote(self.bucket,safe="")}/o',
-            params={'uploadType':'media','name':name},data=data,
-            headers={'Content-Type':mime},timeout=45)
-        if not res.ok:
-            raise RuntimeError(f'Private image upload failed (HTTP {res.status_code}); confirm Storage Object Admin on the bucket')
-        return f'gcs://{self.bucket}/{name}'
+        if not mime.startswith('image/') or len(data)>8_000_000:
+            raise ValueError('Upload an image smaller than 8 MB')
+        if mime not in ('image/png','image/jpeg','image/webp'):
+            raise ValueError('Only PNG/JPG/WebP images are allowed')
+        # Normalise uploads to a reasonably sized photo; no large binaries in
+        # the GitHub Contents API and no original private images in app source.
+        with Image.open(BytesIO(data)) as loaded:
+            loaded=ImageOps.exif_transpose(loaded)
+            if loaded.width*loaded.height>30_000_000:
+                raise ValueError('Image resolution is too large')
+            if loaded.mode in ('RGBA','LA') or (loaded.mode=='P' and 'transparency' in loaded.info):
+                rgba=loaded.convert('RGBA')
+                bg=Image.new('RGB',rgba.size,'white')
+                bg.paste(rgba,mask=rgba.getchannel('A'))
+                loaded=bg
+            else:
+                loaded=loaded.convert('RGB')
+            raw=None
+            for dimension in (1100,900,700,500):
+                picture=loaded.copy();picture.thumbnail((dimension,dimension))
+                for quality in (84,72,58):
+                    temp=BytesIO()
+                    picture.save(temp,format='JPEG',quality=quality,optimize=True)
+                    if len(temp.getvalue())<950_000:
+                        raw=temp.getvalue();break
+                if raw is not None:break
+            if raw is None:raise ValueError('Could not compress image for GitHub')
+        stem=re.sub(r'[^a-zA-Z0-9_-]+','-',Path(filename).stem).strip('-')[:60] or 'image'
+        subdir='logo' if folder_id=='logo' else 'recipes'
+        path=f'assets/{subdir}/{stem}-{uuid4().hex[:12]}.jpg'
+        data=raw
+        self.store.write_bytes(path,data,message='Ragasaan PO: add recipe image')
+        return path
 
     def read(self,file_id):
-        file_id=str(file_id or '').strip()
-        if not file_id:return None
-        if not file_id.startswith('gcs://'):
-            return GoogleDriveImages(self.credentials).read(file_id)
-        raw=file_id[6:]
-        bucket,sep,name=raw.partition('/')
-        if not sep or not name or not self.bucket or bucket!=self.bucket:
-            raise ValueError('Cloud Storage bucket mismatch or invalid object path')
-        res=self._session().get(
-            f'https://storage.googleapis.com/storage/v1/b/{quote(bucket,safe="")}/o/{quote(name,safe="")}',
-            params={'alt':'media'},timeout=25)
-        res.raise_for_status()
-        return res.content
+        if not str(file_id).startswith(('assets/recipes/','assets/logo/')):
+            return None  # Legacy Drive IDs cannot be fetched without Google.
+        payload,_=self.store.read_bytes(str(file_id))
+        return payload

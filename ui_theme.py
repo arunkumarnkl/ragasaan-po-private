@@ -1,6 +1,6 @@
 """V3.6 navy-and-pastel design system for the existing Streamlit application.
 
-Presentation-only: no business calculations, Google credentials, or permissions.
+Presentation-only: no business calculations, GitHub credentials, or permissions.
 """
 from __future__ import annotations
 from html import escape
@@ -98,9 +98,67 @@ section[data-testid="stSidebar"] button{border-color:#d5ddec;background:#fff;bor
 """
 
 
-def inject_theme():
+DARK_OVERRIDES = r"""
+:root { color-scheme: dark!important; --rag-ink:#e4eafb; --rag-muted:#a9b8d0;
+  --rag-surface:#1e2a42; --rag-bg:#121b2c; --rag-border:#35445d;
+  --rag-periwinkle:#302b56; }
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stAppViewBlockContainer"]{
+  background:#121b2c!important;color:#e4eafb!important}
+[data-testid="stHeader"]{background:#121b2c!important}
+section[data-testid="stSidebar"], [data-testid="stSidebarContent"]{
+  background:#18243a!important;border-color:#38475f!important;color:#e4eafb!important}
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+.stApp p, .stApp label, .stApp span, .stApp li{color:#d7e1f5!important}
+.stApp h1,.stApp h2,.stApp h3,.stApp h4,
+.stApp [data-testid="stWidgetLabel"] p{color:#e7edfc!important}
+.stApp [data-testid="stForm"],.stApp [data-testid="stExpander"],
+.stApp [data-testid="stMetric"],.stApp [data-testid="stDataFrame"],
+.stApp [data-testid="stDataEditor"]{
+  background:#1d2a41!important;border-color:#394961!important;color:#ecf2ff!important}
+.stApp [data-baseweb="input"],.stApp [data-baseweb="select"]>div,
+.stApp [data-baseweb="textarea"],.stApp textarea,.stApp input,
+.stApp [role="combobox"],.stApp [data-baseweb="popover"]{
+  background:#24324a!important;color:#f1f5ff!important;border-color:#475771!important}
+.stApp input::placeholder,.stApp textarea::placeholder{color:#9eafc8!important}
+.stApp [data-testid="stButton"] button:not([kind="primary"]),
+.stApp [data-testid="stDownloadButton"] button:not([kind="primary"]),
+section[data-testid="stSidebar"] button{
+  background:#273650!important;color:#e5edfa!important;border-color:#485a75!important}
+.stApp [data-testid="stMetricValue"]{color:#c5c8ff!important}
+.stApp [data-testid="stDataFrame"] [role="columnheader"]{
+  background:#30405c!important;color:#f2f5ff!important}
+.stTabs [aria-selected="true"]{background:#474374!important;color:#fafaff!important}
+.rag-page-heading{background:#202e47!important;border-color:#9b94f0!important}
+.rag-page-title{color:#f7f7ff!important}.rag-page-subtitle{color:#b8c8e4!important}
+.rag-section-line{color:#dae5fa!important}
+.rag-summary .rag-stat,.rag-stat{background:#24334d!important;border-color:#4c5b77!important;color:#dce7f7!important}
+.rag-stat strong{color:#c5c2ff!important}
+.rag-recipe-scroll,.rag-doc-preview{background:#1d2941!important;border-color:#45556f!important;color:#eaf0fd!important}
+.rag-recipe-table th,.rag-doc-preview th{background:#31415f!important;color:#eaf2ff!important;border-color:#43536d!important}
+.rag-recipe-table td,.rag-doc-preview td{border-color:#3c4a64!important;color:#e6edfc!important}
+.rag-recipe-row:nth-of-type(even),.rag-doc-preview tr:nth-child(even){background:#24334b!important}
+.rag-recipe-row:hover{background:#344664!important}
+.rag-group-head td{background:#343d66!important;color:#ffffff!important}
+.rag-recipe-drink strong,.rag-ing-name,.rag-ing-quantity,.rag-doc-preview h4{color:#eef2ff!important}
+.rag-cat-pill{background:#374a71!important;color:#e8f4ff!important}
+.rag-cat-pill.mocktail{background:#275348!important;color:#d2ffed!important}
+.rag-cat-count,.rag-recipe-note,.rag-empty,.rag-doc-preview p{color:#bdc9db!important}
+.rag-ingredient-line{border-color:#3f4d68!important}
+.rag-recipe-placeholder,.rag-recipe-thumbnail{background:#283951!important;border-color:#465b7b!important}
+"""
+LIGHT_OVERRIDES = ":root {color-scheme: light!important}"
+
+def inject_theme(mode='Auto'):
     import streamlit as st
     st.markdown(CSS, unsafe_allow_html=True)
+    choice=str(mode or 'Auto').strip().casefold()
+    if choice=='dark':
+        override=DARK_OVERRIDES
+    elif choice=='light':
+        override=LIGHT_OVERRIDES
+    else:
+        override='@media (prefers-color-scheme: dark) {'+DARK_OVERRIDES+'}'
+    st.markdown('<style>'+override+'</style>',unsafe_allow_html=True)
 
 
 def hero(username,role):
@@ -109,7 +167,7 @@ def hero(username,role):
     role=escape(str(role or ''))
     st.markdown(
         '<div class="rag-hero"><div class="rag-brand"><div class="rag-logo">🍸</div>'
-        '<div><div class="rag-brand-title">Ragasaan</div><div class="rag-brand-caption">Purchase Order · Live Google Sheets</div></div>'
+        '<div><div class="rag-brand-title">Ragasaan</div><div class="rag-brand-caption">Purchase Order · Private GitHub</div></div>'
         '</div><div class="rag-user-chip">● &nbsp;'+user+' · '+role+'</div></div>',
         unsafe_allow_html=True,
     )

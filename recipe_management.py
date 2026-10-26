@@ -1,6 +1,6 @@
 """Administrator-only Recipe Book management; never imported into bartender views.
 
-Operations preserve the existing wide Google Sheets Recipe matrix:
+Operations preserve the existing wide GitHub Recipe matrix:
 row 1 holds ingredient IDs, row 2 their names, category/name are A/B.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ def save_recipe_changes(store, rec, values, *, name, category, new_ingredient_id
     Recipe table row indices are 1-based and come from parse_recipe_matrix.
     """
     if not store.writable:
-        raise PermissionError('Live Google Sheets connection is required')
+        raise PermissionError('Live GitHub connection is required')
     name = str(name).strip()
     category = str(category).strip()
     if not name or not category:
@@ -66,10 +66,10 @@ def save_recipe_changes(store, rec, values, *, name, category, new_ingredient_id
 def delete_recipe(store, rec, notes, image_rows):
     """Delete the recipe matrix row by its absolute sheet row number.
 
-    Deleting an entire Google Sheet row preserves other recipe rows and header cells.
+    Deleting an entire GitHub database row preserves other recipe rows and header cells.
     Metadata rows keyed by that name are also removed.
     """
-    if not store.writable:raise PermissionError('Live Google Sheets connection is required')
+    if not store.writable:raise PermissionError('Live GitHub connection is required')
     if int(rec['row'])<3:raise ValueError('Cannot delete Recipe headers')
     store.delete_row('Recipe',int(rec['row']))
     name=str(rec['name']).casefold()
@@ -92,7 +92,7 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                              settings, recipe_suggestion, after_save, image_bucket=""):
     import streamlit as st
     st.markdown('#### Recipe Management')
-    st.caption('Administrator-only edits to the existing Google Sheets Recipe matrix. '
+    st.caption('Administrator-only edits to the existing GitHub Recipe matrix. '
                'The public Recipe Book is entirely read-only, including for Bartenders.')
     by_name={r['name']:r for r in recipes}
     categories=sorted({str(r.get('category') or 'Uncategorised') for r in recipes},key=str.casefold)
@@ -151,7 +151,7 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                             name=name_input,category=category_input,new_ingredient_id=new_id,
                             new_ingredient_qty=new_qty,matrix=matrix,notes=note_rows,
                             remarks=remarks,garnish_notes=garnish_notes,image_rows=image_rows)
-                        after_save('Recipe updated in Google Sheets')
+                        after_save('Recipe updated in GitHub')
                     except Exception as exc:st.error(f'Could not save recipe: {exc}')
     with tab_add:
         with st.form('admin_add_recipe_v36'):
@@ -162,9 +162,9 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
             ids=st.multiselect('Ingredients',choices,format_func=lambda i:ingredients[i]['item'])
             qtys={iid:st.number_input(f'{ingredients[iid]["item"]} · qty',min_value=0.0,step=.5,
                                        key=f'admin_create_qty_{iid}') for iid in ids}
-            add_clicked=st.form_submit_button('Add recipe to Google Sheets',type='primary')
+            add_clicked=st.form_submit_button('Add recipe to GitHub',type='primary')
         if add_clicked:
-            if not store.writable:st.error('Connect Google Sheets before adding a recipe')
+            if not store.writable:st.error('Connect GitHub before adding a recipe')
             elif not name.strip() or not str(cat).strip():st.error('Provide a name and category')
             elif any(name.strip().casefold()==r['name'].casefold() for r in recipes):st.error('A recipe with that name exists')
             elif not any(x>0 for x in qtys.values()):st.error('Add one or more ingredient quantities')
@@ -172,8 +172,8 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                 new_row=[cat.strip(),name.strip()]+[qtys.get(identifier(v),'') for v in matrix[0][2:]]
                 store.append_rows('Recipe',[new_row]);after_save('New recipe added')
     with tab_remove:
-        st.warning('Deleting a recipe removes its row from Google Sheets, plus its notes and image references. '
-                   'It does not delete photos from Google Drive.')
+        st.warning('Deleting a recipe removes its row from GitHub, plus its notes and image references. '
+                   'It does not delete photos from private GitHub.')
         selected=st.selectbox('Recipe to delete',['']+[r['name'] for r in recipes],key='admin_del_recipe')
         acknowledged=st.checkbox('I have backed up the Recipe sheet and want to delete this recipe',
                                 key='admin_confirm_del_recipe')
@@ -198,7 +198,7 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                     try:
                         raw=PersistentImages(store.credentials,bucket=image_bucket).read(stored['drive_file_id'])
                         st.image(crop_thumbnail(raw),width=RECIPE_IMAGE_PX)
-                    except Exception:st.warning('Drive photo currently unavailable')
+                    except Exception:st.warning('GitHub photo currently unavailable')
                 else:st.caption('No saved override. The Recipe Book can suggest an online photo.')
                 if stored.get('attribution'):st.caption(str(stored['attribution']))
             with col_manage:
@@ -211,7 +211,7 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                     st.caption(suggestion.get('attribution','Wikimedia Commons'))
                     st.link_button('Source / licence',suggestion['page'])
                     if st.button('Use suggestion for this recipe',key='admin_save_suggestion'):
-                        if not store.writable:st.error('Connect Google Sheets to save')
+                        if not store.writable:st.error('Connect GitHub to save')
                         else:
                             store.save_table('PO_Recipe_Images',upsert_image_record(image_rows,sel,
                                image_url=suggestion['url'],source=suggestion['page'],
@@ -221,7 +221,7 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                 if st.button('Save image URL',key='admin_save_img_url'):
                     parsed=urlsplit(new_url.strip())
                     if parsed.scheme!='https' or not parsed.netloc:st.error('Only HTTPS image URLs are accepted')
-                    elif not store.writable:st.error('Connect Google Sheets to save')
+                    elif not store.writable:st.error('Connect GitHub to save')
                     else:
                         store.save_table('PO_Recipe_Images',upsert_image_record(image_rows,sel,
                             image_url=new_url.strip(),source='Admin image URL',
@@ -231,18 +231,18 @@ def render_recipe_management(*, recipes, ingredients, matrix, store, grid, recor
                                        key=f'admin_image_file_{sel}')
                 if st.button('Upload and use photo',disabled=photo is None,key='admin_image_upload'):
                     try:
-                        if not store.writable:raise PermissionError('Connect Google Sheets to save')
+                        if not store.writable:raise PermissionError('Connect GitHub to save')
                         mime,filename=verify_upload(photo.getvalue(),photo.name)
-                        folder=str(settings.get('Recipe_Image_Drive_Folder_ID','')).strip()
-                        if not folder and not image_bucket:raise ValueError('Configure the Shared Drive image folder, or set gcs_image_bucket in Streamlit secrets')
+                        folder=''  # Images go directly into private GitHub assets/recipes/
+
                         fid=PersistentImages(store.credentials,bucket=image_bucket).upload(folder,filename,photo.getvalue(),mime)
                         store.save_table('PO_Recipe_Images',upsert_image_record(image_rows,sel,
-                            drive_file_id=fid,source=('Private Cloud Storage' if image_bucket else 'Private Google Drive'),
+                            drive_file_id=fid,source=('Private Cloud Storage' if image_bucket else 'Private private GitHub'),
                             attribution='User-provided photo'),IMAGE_COLUMNS)
                         after_save('New image uploaded and linked')
                     except Exception as exc:st.error(f'Unable to upload: {exc}')
                 if stored and st.button('Reset to suggested image',key='admin_reset_image'):
-                    if not store.writable:st.error('Connect Google Sheets to save')
+                    if not store.writable:st.error('Connect GitHub to save')
                     else:
                         remaining=[r for r in image_rows if str(r.get('recipe_name','')).casefold()!=sel.casefold()]
                         store.save_table('PO_Recipe_Images',remaining,IMAGE_COLUMNS)

@@ -1,10 +1,11 @@
-"""Ragasaan Purchase Order | Streamlit + Google Sheets.
+"""Ragasaan Purchase Order | Streamlit + private GitHub database.
 
 Run with: streamlit run app.py
-All inventory, recipes and contacts come from the connected spreadsheet.
+All purchasing records come from database/*.json in a private GitHub repository.
 """
 from __future__ import annotations
 from collections import defaultdict
+import os
 from datetime import datetime
 from io import BytesIO
 import json
@@ -42,12 +43,14 @@ from startup_repair import plan_price_basis_repair
 from po_v3_logic import (SOURCE_CHOICES, pack_factor, purchase_unit, master_case_size,
                          migrate_rules, calculate_meal_detail, recipe_demand, alcohol_demand,
                          order_from_demand, pivot_meals)
-from sheet_store import (SHEET_ID, GoogleStore, ExcelPreview,
-                         credentials_from_secrets, load_saved_connection, save_connection_to_keyring, clear_saved_connection)
+from sheet_store import GitHubStore, credentials_from_secrets
 
 st.set_page_config(page_title="Ragasaan | Purchase Order",page_icon="🍸",layout="wide",
                    initial_sidebar_state="expanded")
-inject_theme()
+# An explicit mode selector supplements the browser/system dark-mode preference.
+theme_mode = st.sidebar.selectbox("Appearance", ["Auto", "Light", "Dark"], index=0,
+                                  key="ragasaan_appearance", help="Auto follows your browser/system theme")
+inject_theme(theme_mode)
 
 SHEET_NAMES={"users":"Users","ingredients":"Ingredients","recipe":"Recipe",
              "vendors":"Vendor Data","venue":"Venue","contacts":"Contacts",
@@ -69,16 +72,12 @@ def secrets_value(name,default=None):
     except (FileNotFoundError, OSError, KeyError):return default
 
 
-# Cloud credentials are configured server-side in Streamlit Cloud's Secrets UI.
-# On the cloud never expose a service-account JSON upload field to visitors.
-CLOUD_MODE = str(secrets_value('deployment_mode','local')).strip().casefold() == 'cloud'
-
+# GitHub credentials are server-side Streamlit Secrets (never browser uploads).
+CLOUD_MODE = True
 
 @st.cache_resource(show_spinner=False)
-def connect_gsheet(sheet_id,credential_str):
-    import json
-    return GoogleStore(sheet_id,json.loads(credential_str))
-
+def connect_github(repo,branch,token):
+    return GitHubStore(repo,token,branch)
 
 @st.cache_data(ttl=60,show_spinner=False)
 def read_grid(_store,title,refresh):
@@ -128,7 +127,7 @@ def load_app_data():
     raw_settings=records(SHEET_NAMES['settings'])
     if not raw_rules or not raw_matrix or not raw_settings:
         missing=[x for x,v in [('PO_Rules',raw_rules),('PO_Alcohol_Matrix',raw_matrix),('PO_Settings',raw_settings)] if not v]
-        raise ValueError('Missing required Google Sheets: '+', '.join(missing)+'. Admin must sync the revised workbook.')
+        raise ValueError('Missing required GitHub: '+', '.join(missing)+'. Admin must sync the revised workbook.')
     rules=migrate_rules(raw_rules)
     for r in raw_matrix:
         if number(r.get('bottles_per_guide_unit'))<=0:
@@ -174,9 +173,9 @@ def editor_table(title,display_title,headers,help_text=""):
     source=pd.DataFrame(original,columns=headers)
     edited=st.data_editor(source,num_rows="dynamic",use_container_width=True,hide_index=True,
                           column_config=compact_columns(source),key="editor_"+title)
-    if st.button("Save to Google Sheets",key="save_"+title,type="primary"):
+    if st.button("Save to GitHub",key="save_"+title,type="primary"):
         if not st.session_state.store.writable:
-            st.error("Connect Google Sheets to save. The Excel preview is read-only.");return
+            st.error("Connect GitHub to save. The Excel preview is read-only.");return
         cleaned=[]
         for r in edited.fillna("").to_dict("records"):
             if any(str(v).strip() for v in r.values()):cleaned.append(r)
@@ -195,75 +194,48 @@ def lookup_select(label, rows, name_field, key):
     return next((r for r in rows if str(r.get(name_field,""))==name),{})
 
 
-# CONNECTION: automatically try Streamlit secrets, environment, then OS credential vault.
+# Private GitHub is the only runtime database and asset store.
 if "store" not in st.session_state:
-    saved=None if CLOUD_MODE else load_saved_connection()
-    creds=credentials_from_secrets(st.secrets)
-    sheet_id=secrets_value("gsheet_id",SHEET_ID)
-    if not creds and saved:
-        creds=saved.get('credentials');sheet_id=saved.get('sheet_id',SHEET_ID)
-    if creds:
-        try:
-            import json
-            st.session_state.store=connect_gsheet(sheet_id,json.dumps(creds,sort_keys=True))
-            st.session_state.pop('connect_error',None)
-        except Exception:
-            st.session_state.connect_error="Cannot connect using stored credentials. Verify service-account access."
-
-if "store" not in st.session_state and CLOUD_MODE:
-    st.error("Cloud Google Sheets connection is not configured or failed. Add a valid [gcp_service_account] and gsheet_id in the app's Streamlit Community Cloud Secrets settings. The JSON key cannot be uploaded through this web page.")
-    st.info("Check Google Sheets API access, the Spreadsheet ID and sharing permission for the service-account email. See CLOUD_DEPLOYMENT.md.")
-    st.stop()
-
-if "store" not in st.session_state:
-    st.title("Ragasaan Purchase Order · First-time connection")
-    st.info("No Excel upload is needed. The app loads directly from Google Sheets once a service account is configured.")
-    if st.session_state.get('connect_error'):st.error(st.session_state.connect_error)
-    st.caption("One-time setup: create a NEW service-account key, share your Google Sheet with its email as Editor, then upload the JSON here. On Windows it can be remembered in Credential Manager.")
-    with st.form('first_connection_form'):
-        sheet_id=st.text_input('Google Spreadsheet ID',value=SHEET_ID)
-        key_file=st.file_uploader('NEW service-account JSON key',type=['json'])
-        remember=st.checkbox('Remember securely on this computer (Windows Credential Manager / OS keyring)',value=True)
-        submit=st.form_submit_button('Connect to Google Sheets',type='primary')
-    if submit:
-        try:
-            import json
-            if not key_file:raise ValueError('Select the JSON key')
-            creds=json.loads(key_file.getvalue().decode('utf-8'))
-            if creds.get('type')!='service_account' or not creds.get('private_key') or not creds.get('client_email'):
-                raise ValueError('Not a valid service-account JSON')
-            connection=connect_gsheet(sheet_id.strip(),json.dumps(creds,sort_keys=True))
-            if not connection.read(SHEET_NAMES['users']):raise ValueError('Users sheet not found or empty')
-            st.session_state.store=connection
-            if remember:
-                try:save_connection_to_keyring(sheet_id.strip(),creds)
-                except Exception:
-                    st.warning('Connected, but OS keyring storage failed. Configure secrets.toml once for automatic startup.')
-            st.rerun()
-        except Exception as exc:
-            st.error(f'Unable to connect: {type(exc).__name__}. Check the key, Sheet sharing and Spreadsheet ID.')
-    st.stop()
+    github_cfg = credentials_from_secrets(st.secrets)
+    if not github_cfg:
+        st.error("GitHub connection not configured. Set github_repo and github_token in "
+                 "Streamlit Community Cloud → App settings → Secrets.")
+        st.info("Your old gsheet_id and GitHub settings are no longer used. "
+                "See GITHUB_DEPLOY_UPDATE.md in the replacement files.")
+        st.stop()
+    try:
+        connected = connect_github(github_cfg['repo'],github_cfg['branch'],github_cfg['token'])
+        if not connected.read(SHEET_NAMES['users']):
+            raise ValueError('database/users.json is missing or empty. Upload the included database folder.')
+        st.session_state.store=connected
+    except Exception as exc:
+        st.error(f"Cannot load private GitHub database: {exc}")
+        st.info("Confirm the token has Contents: Read and write permission on your private "
+                "repository, the branch name is correct, and database/*.json files are uploaded.")
+        st.stop()
 
 store=st.session_state.store
 with st.sidebar:
     st.markdown('### 🍸 Ragasaan PO')
-    st.caption('🟢 Google Sheets · Live connection')
-    if st.button("Refresh spreadsheet data",use_container_width=True):refresh();st.rerun()
-    if not CLOUD_MODE and st.session_state.get('role', '').strip().casefold() == 'admin':
-        if st.button('Forget saved Google connection',use_container_width=True):
-            clear_saved_connection()
-            st.info('Saved connection cleared from OS keyring. Streamlit server secrets, if configured, remain unaffected.')
-
+    st.caption('🟢 GitHub · Private data repository')
+    if st.button('Refresh GitHub data',use_container_width=True):
+        refresh();st.rerun()
 
 if not st.session_state.get("username"):
     st.title("Sign in")
-    st.caption("Accounts are read from the workbook's Users sheet. Passwords are not kept in app source code.")
+    st.caption("User accounts are stored as password hashes in your private GitHub repository. "
+               "For first sign-in, use the administrator account defined in Streamlit Secrets.")
     with st.form("login_form"):
         uname=st.text_input("Username")
         pwd=st.text_input("Password",type="password")
         submitted=st.form_submit_button("Log in",type="primary")
     if submitted:
-        user=authenticate(uname,pwd,records(SHEET_NAMES["users"]))
+        login_users=records(SHEET_NAMES["users"])
+        bootstrap_name=str(secrets_value('bootstrap_admin_username','')).strip()
+        bootstrap_hash=str(secrets_value('bootstrap_admin_password_hash','')).strip()
+        if bootstrap_name and bootstrap_hash.startswith('pbkdf2_sha256$'):
+            login_users=login_users+[{'username':bootstrap_name,'password':bootstrap_hash,'role':'Admin'}]
+        user=authenticate(uname,pwd,login_users)
         if not user:st.error("Incorrect username or password")
         else:
             st.session_state.username=str(user["username"])
@@ -280,13 +252,13 @@ with st.sidebar:
 try:
     ingredients, recipes, recipe_issues, rules, alcohol_matrix, recipe_matrix, po_settings, supplier_prices=load_app_data()
 except Exception as exc:
-    st.error(f"The main tabs cannot open because some required Google Sheets data is incomplete: {exc}")
+    st.error(f"The main tabs cannot open because some required GitHub data is incomplete: {exc}")
     st.info("The app automatically opens the main tabs once all required fields are available. "
-            "The connected Google Sheet and your Admin login are already working. "
-            "You do not need to reconnect your Google account.")
+            "The connected GitHub database and your Admin login are already working. "
+            "You do not need to reconnect to GitHub.")
     err_text=str(exc).casefold()
     if '429' in err_text or 'quota' in err_text:
-        st.warning("Google Sheets read quota may be exhausted. Allow the quota to recover "
+        st.warning("GitHub read quota may be exhausted. Allow the quota to recover "
                    "before selecting Retry; repeated rapid refreshes can make this worse.")
     if st.button('Retry opening main application',key='startup_retry'):
         refresh()
@@ -302,7 +274,7 @@ except Exception as exc:
             default=['PO_Rules','PO_Alcohol_Matrix','PO_Settings','PO_Supplier_Prices'],
             key='install_tabs_v33')
         fix_basis=st.checkbox('Also repair only missing Ingredients.price_basis values (recommended; does not replace Ingredients)',value=True,key='init_repair_basis_v33')
-        confirmed_init=st.checkbox('I backed up my live Google Sheet and approve these configuration changes',key='confirm_init_v33')
+        confirmed_init=st.checkbox('I backed up my live GitHub database and approve these configuration changes',key='confirm_init_v33')
 
         def read_install_workbook():
             if not initialize_upload:
@@ -337,7 +309,7 @@ except Exception as exc:
                 after_save('Configuration updated. Opening main tabs')
             except Exception as install_exc:
                 st.error('Setup was not completed: '+str(install_exc))
-                st.caption('If any earlier tabs were saved, they remain in Google Sheets. '
+                st.caption('If any earlier tabs were saved, they remain in GitHub. '
                            'Repair or retry; do not replace the entire Ingredients worksheet.')
 
         if initialize_upload:
@@ -418,7 +390,7 @@ with page_recipe:
         str(len(visible))+'</strong> matching recipes'+(f' · page {page_num}/{pages}' if pages>1 else '')+
         '</div><div class="rag-stat">Read-only · Edit in Admin Settings</div></div>',unsafe_allow_html=True)
     # Load only selected page's saved image overrides. A public URL is loaded
-    # lazily by the browser. Private Drive thumbnails are cached in session memory.
+    # lazily by the browser. Private GitHub thumbnails are cached in session memory.
     # Expensive Wikimedia suggestion lookups are opt-in, preventing 120 API calls
     # whenever the user merely opens Recipe Book.
     suggest_online=st.toggle('Show recommended Wikimedia Commons images for missing photos',value=False,
@@ -441,7 +413,7 @@ with page_recipe:
             if file_id not in drive_cache:
                 try:
                     buf=BytesIO()
-                    thumb=crop_thumbnail(PersistentImages(store.credentials,bucket=str(secrets_value('gcs_image_bucket',''))).read(file_id))
+                    thumb=crop_thumbnail(PersistentImages(store.credentials,bucket='' ).read(file_id))
                     thumb.save(buf,format='PNG')
                     drive_cache[file_id]='data:image/png;base64,'+base64.b64encode(buf.getvalue()).decode('ascii')
                 except Exception:
@@ -536,7 +508,7 @@ with calc_left:
               'Ingredient':st.column_config.TextColumn(width=165),
               'Total':st.column_config.NumberColumn(width=65,format='%.2f'),
               **{m:st.column_config.NumberColumn(label=m[:2].upper(),min_value=0,step=.1,format='%.2f',width=60) for m in MEALS}})
-    st.caption('Totals are in purchasing packs; edited quantities update the PO. Pack sizes come from Google Sheets.')
+    st.caption('Totals are in purchasing packs; edited quantities update the PO. Pack sizes come from GitHub.')
     # Reconstruct meal demands from the pivot so manual per-meal overrides take precedence.
     meal_final=[]
     by_auto={r['ID']:r for r in base_pivot}
@@ -565,7 +537,7 @@ def alcohol_choices(master, matrix):
             continue
         grouped='Sparkling Wine / Champagne' if cat.casefold()=='prosecco' else cat
         display.setdefault(grouped,[]).append(iid)
-    # Display categories in Google matrix order, then additional master categories.
+    # Display categories in Recipe matrix order, then additional master categories.
     matrix_order=list(dict.fromkeys('Sparkling Wine / Champagne' if str(x.get('category','')).casefold()=='prosecco' else str(x.get('category','')) for x in matrix))
     ordered=[x for x in matrix_order if x in display]+sorted(set(display)-set(matrix_order))
     for cat in display:
@@ -674,7 +646,7 @@ with calc_right:
             st.session_state.alcohol_next_v32=rid+1
             st.session_state.alcohol_rows_v32.append(rid)
             st.rerun()
-        st.caption('Guide and Manual use the guide units from Google Sheets; final bottles/cases are calculated in the Purchase Order preview using the current Case Size.')
+        st.caption('Guide and Manual use the guide units from GitHub; final bottles/cases are calculated in the Purchase Order preview using the current Case Size.')
         for issue in alcohol_issues:st.warning(issue)
     else:st.caption('Enter dinner guests in Calculation to enable this section.')
 
@@ -737,7 +709,7 @@ with page_po:
                 st.session_state._last_venue=venue_name
             address=st.text_input('Delivery address',key='po_address')
             if CLOUD_MODE:
-                logo_bytes=fetch_cloud_logo(po_settings,store.credentials,bucket=str(secrets_value('gcs_image_bucket','')))
+                logo_bytes=fetch_cloud_logo(po_settings,store.credentials,bucket='' )
             else:
                 logo_bytes=load_default_logo()
             if logo_bytes:
@@ -857,82 +829,31 @@ with page_admin:
         st.warning("Admin-only area. Recipe modifications and master data are protected.")
     else:
         st.subheader("Administrator settings")
-        st.caption("Changes are written directly to Google Sheets and may affect all users. Download a Google Sheet backup before saving.")
+        st.caption("Changes are written directly to GitHub and may affect all users. Download a GitHub database backup before saving.")
         if CLOUD_MODE:
-            with st.expander('Company logo — persistent Google Drive storage'):
-                st.caption('Save the logo in a Google Workspace Shared Drive folder. It persists across cloud restarts and redeploys.')
-                current_logo=fetch_cloud_logo(po_settings,store.credentials,bucket=str(secrets_value('gcs_image_bucket','')))
+            with st.expander('Company logo — permanent GitHub assets'):
+                st.caption('Upload once: the image is committed to your private GitHub repository and remains available after redeployments.')
+                current_logo=fetch_cloud_logo(po_settings,store.credentials,bucket='' )
                 if current_logo:st.image(BytesIO(current_logo),width=170)
-                drive_folder=str(po_settings.get('Recipe_Image_Drive_Folder_ID','')).strip()
-                cloud_bucket=str(secrets_value('gcs_image_bucket','')).strip()
-                if not drive_folder and not cloud_bucket:st.warning('Configure a Shared Drive folder below, or set gcs_image_bucket in Streamlit Cloud Secrets.')
+                drive_folder=''
+                cloud_bucket='' 
                 logo_upload=st.file_uploader('Upload permanent logo (PNG or JPG)',type=['png','jpg','jpeg'],key='cloud_company_logo')
-                if st.button('Save permanent company logo',disabled=not bool(logo_upload and (drive_folder or cloud_bucket)),key='cloud_save_logo'):
+                if st.button('Save permanent company logo',disabled=not bool(logo_upload),key='cloud_save_logo'):
                     try:
                         save_cloud_logo(store,records(SHEET_NAMES['settings']),drive_folder,logo_upload.name,logo_upload.getvalue(),bucket=cloud_bucket)
-                        after_save('Company logo saved in private Google Drive')
+                        after_save('Company logo saved in private GitHub assets')
                     except Exception:
-                        st.error('Could not upload logo. Check the Shared Drive write permission or private Cloud Storage bucket access.')
+                        st.error('Could not upload logo. Check GitHub token Contents write permission and image size (under 950 KB).')
                 if st.button('Remove cloud logo reference',key='cloud_clear_logo'):
                     clear_cloud_logo(store,records(SHEET_NAMES['settings']))
-                    after_save('Cloud logo reference removed; the file remains in Drive')
-            st.info('Google credentials are stored only in Streamlit Community Cloud Secrets; they cannot be uploaded in the web app.')
-        else:
-            with st.expander('Company logo — automatically load on every startup'):
-                st.caption('Upload the Ragasaan logo once. It is saved locally in the application assets folder and reused in PO previews and Word downloads. The logo is not stored in Google Sheets. If no local logo exists, the app tries the previously supplied Google Drive image URL when first opened.')
-                existing_logo=load_default_logo()
-                if existing_logo:st.image(BytesIO(existing_logo),width=170)
-                candidate=st.file_uploader('Set default logo (PNG or JPG)',type=['png','jpg','jpeg'],key='admin_default_logo')
-                logo_actions=st.columns(2)
-                with logo_actions[0]:
-                    if st.button('Save as default company logo',key='save_default_logo',disabled=candidate is None):
-                        try:
-                            save_logo(candidate.getvalue())
-                            st.success('Company logo saved for future launches.');st.rerun()
-                        except (ValueError,OSError) as exc:st.error(str(exc))
-                with logo_actions[1]:
-                    if st.button('Remove local logo',key='remove_default_logo'):
-                        clear_logo();st.rerun()
-            with st.expander("Connect Google Sheets using JSON upload", expanded=not store.writable):
-                st.write("Upload a newly generated Google service-account JSON key. The key is kept in server session memory, not saved to disk.")
-                st.caption("Share the spreadsheet with the service-account email as Editor first. Do not reuse the exposed old key.")
-                with st.form("admin_google_connection"):
-                    target_id=st.text_input("Google Spreadsheet ID",value=SHEET_ID)
-                    key_file=st.file_uploader("Service-account JSON file",type=["json"])
-                    remember_admin=st.checkbox('Remember key in OS credential vault for automatic startup',value=True)
-                    connect_clicked=st.form_submit_button("Connect Google Sheets",type="primary")
-                if connect_clicked:
-                    try:
-                        import json
-                        if key_file is None:raise ValueError("Select a JSON file")
-                        payload=json.loads(key_file.getvalue().decode("utf-8"))
-                        if payload.get("type")!="service_account" or not payload.get("client_email") or not payload.get("private_key"):
-                            raise ValueError("Not a valid service-account JSON")
-                        connected=connect_gsheet(target_id.strip(),json.dumps(payload,sort_keys=True))
-                        if not connected.read("Users"):raise ValueError("Users worksheet not found")
-                        st.session_state.store=connected
-                        if remember_admin:
-                            try:save_connection_to_keyring(target_id.strip(),payload)
-                            except Exception:st.warning('Connected, but OS keyring storage was unavailable.')
-                        st.session_state.pop("preview_sha",None)
-                        st.session_state["refresh_count"]=st.session_state.get("refresh_count",0)+1
-                        read_grid.clear()
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Connection failed ({type(exc).__name__}). Check your key, spreadsheet ID, API access and sharing permissions.")
-                if store.writable:st.success("Live Google Sheets connected")
-        with st.expander('Recipe images · Shared Drive / Cloud Storage setup'):
-            st.caption('Suggested images come from Wikimedia Commons. For private uploads use a Google Workspace Shared Drive folder or configure a Cloud Storage bucket in Streamlit Secrets (useful for personal Gmail accounts).')
-            folder=st.text_input('Recipe Image Drive Folder ID',
-                  value=str(po_settings.get('Recipe_Image_Drive_Folder_ID','')),
-                  help='Use a folder within a Google Workspace Shared Drive, or set gcs_image_bucket in Streamlit Cloud Secrets instead (no folder needed for GCS).')
-            if st.button('Save Recipe image folder',key='save_recipe_drive_folder'):
-                settings_rows=records(SHEET_NAMES['settings'])
-                remaining=[r for r in settings_rows if str(r.get('Setting',''))!='Recipe_Image_Drive_Folder_ID']
-                remaining.append({'Setting':'Recipe_Image_Drive_Folder_ID','Value':folder.strip()})
-                store.save_table(SHEET_NAMES['settings'],remaining,['Setting','Value'])
-                after_save('Recipe image Drive folder saved')
-            st.caption('Image references are stored in PO_Recipe_Images. Private uploads remain in Shared Drive or Cloud Storage; Streamlit fetches them using the service account.')
+                    after_save('Logo reference removed; the old image remains in GitHub history')
+            st.info('The GitHub token is stored only in Streamlit Secrets, never in the repository or browser.')
+        with st.expander('Recipe images — private GitHub assets'):
+            st.caption('Uploaded recipe photos are saved to assets/recipes/ in your private GitHub repository. '
+                       'Image references remain in database/po_recipe_images.json. '
+                       'Wikimedia Commons suggestions still work without Google services.')
+            st.info('Images are compressed for GitHub storage; maximum stored image size is 950 KB. '
+                    'Use Admin Settings → Recipe Management → Images to upload or replace a photo.')
         maintenance,master,recipe_admin,calc_settings,guide_help,account=st.tabs([
             "📦 Vendors & Venues", "🥫 Ingredients Master", "📒 Recipe Management",
             "🧮 Editable formulas", "📖 Calculation Guide", "🔐 Users & diagnostics"])
@@ -940,7 +861,7 @@ with page_admin:
             render_recipe_management(recipes=recipes,ingredients=ingredients,matrix=recipe_matrix,
                 store=store,grid=grid,records=records,settings=po_settings,
                 recipe_suggestion=recipe_suggestion,after_save=after_save,
-                image_bucket=str(secrets_value('gcs_image_bucket','')))
+                image_bucket='' )
         with maintenance:
             maintenance_cols=st.columns(2,gap='small')
             for ix,(key,col) in enumerate([("vendors","Vendor Data"),("venue","Venue Data"),("contacts","Ragasaan Contacts")]):
@@ -950,7 +871,7 @@ with page_admin:
                         headers=[str(h) for h in grid(sheet)[0]] if grid(sheet) else []
                         editor_table(sheet,col,headers)
         with maintenance:
-            st.subheader('Supplier-specific price upload & Google Sheets backup')
+            st.subheader('Supplier price import & GitHub data backup')
             st.caption('Upload CSV/Excel with Source, ingredient_id, net_price, price_basis (Pack or Single). Missing supplier prices fall back to Ingredients.unit_price.')
             uploaded_prices=st.file_uploader('Supplier pricing CSV / Excel',type=['csv','xlsx'],key='price_upload_v33')
             if uploaded_prices is not None:
@@ -960,7 +881,7 @@ with page_admin:
                     st.error('Required columns: '+', '.join(sorted(needed)))
                 else:
                     st.dataframe(price_frame.head(25),hide_index=True,use_container_width=True)
-                    if st.button('Merge supplier prices to Google Sheets',key='merge_prices_v33',type='primary'):
+                    if st.button('Merge supplier prices to GitHub',key='merge_prices_v33',type='primary'):
                         existing=records(SHEET_NAMES['prices'])
                         indexed={(str(r.get('Source','')).casefold(),identifier(r.get('ingredient_id'))):dict(r) for r in existing}
                         errors=[]
@@ -987,17 +908,17 @@ with page_admin:
                         writer=csv.writer(stream);writer.writerows(values);stream.flush()
                         archive.writestr(ws.title.replace('/','_')+'.csv',output.getvalue())
                 return buffer.getvalue()
-            if st.button('Prepare Google Sheets backup (all tabs)',key='backup_v33'):
+            if st.button('Prepare GitHub backup (all tabs)',key='backup_v33'):
                 try:st.session_state['backup_data_v33']=backup_workbook_csv_zip()
                 except Exception as exc:st.error('Backup failed. Try refreshing or check Sheets read quota: '+type(exc).__name__)
             if st.session_state.get('backup_data_v33'):
-                st.download_button('Download Google Sheets backup ZIP',st.session_state.backup_data_v33,
-                  'Ragasaan_Google_Sheets_Backup.zip',mime='application/zip',key='backup_down_v33')
+                st.download_button('Download GitHub backup ZIP',st.session_state.backup_data_v33,
+                  'Ragasaan_GitHub_Database_Backup.zip',mime='application/zip',key='backup_down_v33')
             st.subheader('Sync revised calculation workbook')
-            st.caption('Back up your LIVE Google Sheet first. Only the selected tabs are replaced. Selecting Ingredients (optional) replaces the ENTIRE ingredient master, including existing prices, so compare current live data before importing. Recipe, Users, Vendors, Contacts and Venue are never overwritten.')
+            st.caption('Back up your LIVE GitHub database first. Only the selected tabs are replaced. Selecting Ingredients (optional) replaces the ENTIRE ingredient master, including existing prices, so compare current live data before importing. Recipe, Users, Vendors, Contacts and Venue are never overwritten.')
             sync_upload=st.file_uploader('Updated rule workbook (.xlsx)',type=['xlsx'],key='sync_v33')
             sync_names=st.multiselect('Sheets to sync (select Ingredients only if you intend to replace the entire master)',['PO_Rules','PO_Alcohol_Matrix','PO_Settings','PO_Supplier_Prices','Ingredients'],default=['PO_Rules','PO_Alcohol_Matrix','PO_Settings','PO_Supplier_Prices'],key='sync_tabs_v33')
-            sync_confirm=st.checkbox('I confirm I want to overwrite selected Google Sheets tabs',key='sync_confirm_v33')
+            sync_confirm=st.checkbox('I confirm I want to overwrite selected GitHub tabs',key='sync_confirm_v33')
             if st.button('Sync selected configuration tabs',type='primary',key='sync_execute_v33',disabled=not(sync_upload and sync_confirm and sync_names)):
                 import_frame=pd.read_excel(BytesIO(sync_upload.getvalue()),sheet_name=None,dtype=object,keep_default_na=False)
                 if any(n not in import_frame for n in sync_names):st.error('Some selected tabs are missing in the workbook')
@@ -1084,11 +1005,11 @@ with page_admin:
             original_rules=records(SHEET_NAMES["rules"])
             all_rules=migrate_rules(original_rules)
             if not original_rules:
-                st.info("Using in-app guide formulas. Save a category below to create the PO_Rules Google worksheet; no manual worksheet setup needed.")
+                st.info("Using in-app guide formulas. Save a category below to create the PO_Rules GitHub JSON file; no manual worksheet setup needed.")
             if original_rules != all_rules:
-                st.warning('PO_Rules contains outdated UNS references and/or Hildon table-water bottle formulas. The app corrects these in memory. Save migrated rules to update the Google Sheet.')
+                st.warning('PO_Rules contains outdated UNS references and/or Hildon table-water bottle formulas. The app corrects these in memory. Save migrated rules to update the GitHub database.')
                 if st.button('Save corrected case-based PO_Rules',type='primary'):
-                    if not store.writable:st.error('Connect Google Sheets to save')
+                    if not store.writable:st.error('Connect GitHub to save')
                     else:
                         store.save_table(SHEET_NAMES['rules'],all_rules,RULE_COLUMNS)
                         after_save('PO_Rules case-size corrections saved')
@@ -1123,8 +1044,8 @@ with page_admin:
                                 "package":st.column_config.SelectboxColumn("Package",options=["Any","Regular","Glass","Canned"],width=90),
                                 "formula":st.column_config.TextColumn("Formula",width=170),
                                 "Ingredient name":st.column_config.TextColumn("Ingredient",width=180)}))
-                        if st.button("Save "+group+" rules to Google Sheets",key="save_rules_"+group,type="primary"):
-                            if not store.writable:st.error("Connect Google Sheets to save changes")
+                        if st.button("Save "+group+" rules to GitHub",key="save_rules_"+group,type="primary"):
+                            if not store.writable:st.error("Connect GitHub to save changes")
                             else:
                                 modified=[{k:r.get(k,"") for k in RULE_COLUMNS} for r in changed.fillna("").to_dict("records")
                                           if str(r.get("formula","")).strip() and str(r.get("ingredient_id","")).strip()]
@@ -1147,8 +1068,8 @@ with page_admin:
             edited_alcohol=st.data_editor(pd.DataFrame(alcohol_records,columns=alcohol_cols),
                 num_rows="dynamic",hide_index=True,use_container_width=True,key="alcohol_matrix_admin_v2",
                 column_config=compact_columns(pd.DataFrame(alcohol_records,columns=alcohol_cols)))
-            if st.button("Save alcohol matrix to Google Sheets",type="primary"):
-                if not store.writable:st.error("Connect Google Sheets to save")
+            if st.button("Save alcohol matrix to GitHub",type="primary"):
+                if not store.writable:st.error("Connect GitHub to save")
                 else:
                     store.save_table(SHEET_NAMES["alcohol"],edited_alcohol.fillna("").to_dict("records"),alcohol_cols)
                     after_save("Alcohol guide updated")
@@ -1164,8 +1085,8 @@ with page_admin:
                                "ID":None,"Yield":st.column_config.NumberColumn(min_value=.0001,step=1.,width=72),
                                "Bottle Size":st.column_config.NumberColumn(min_value=.0001,step=1.,width=72),
                                "case size":st.column_config.NumberColumn(min_value=1,step=1.,width=72)}))
-            if st.button("Save garnish yields to Google Sheets",type="primary"):
-                if not store.writable:st.error("Connect Google Sheets to save")
+            if st.button("Save garnish yields to GitHub",type="primary"):
+                if not store.writable:st.error("Connect GitHub to save")
                 else:
                     grid_ingredients=grid(SHEET_NAMES["ingredients"])
                     header=list(grid_ingredients[0]);ids={identifier(row[0]):i for i,row in enumerate(grid_ingredients[1:],start=2) if row}
@@ -1186,7 +1107,7 @@ with page_admin:
                                         "password_format":"Hashed" if str(u.get("password", "")).startswith("pbkdf2_sha256$") else "Legacy plaintext"} for u in all_users])
             st.dataframe(user_frame,hide_index=True,use_container_width=True,
                          column_config=compact_columns(user_frame))
-            st.warning("The supplied workbook contains plaintext passwords. Rotate them and migrate them to hashes. Never publish the workbook or Google service-account key.")
+            st.warning("The supplied workbook contains plaintext passwords. Rotate them and migrate them to hashes. Never publish the workbook or GitHub key.")
             legacy_users=[r for r in all_users if str(r.get('password','')).strip()
                           and not str(r.get('password','')).startswith('pbkdf2_sha256$')]
             if legacy_users:
@@ -1195,7 +1116,7 @@ with page_admin:
                                         key='ack_legacy_hash_v34')
                 if st.button('Hash all legacy passwords (preserve logins)',
                              disabled=not acknowledge,key='migrate_passwords_v34'):
-                    if not store.writable:st.error('Connect live Google Sheets first')
+                    if not store.writable:st.error('Connect live GitHub first')
                     else:
                         current=records(SHEET_NAMES['users'])
                         for r in current:
@@ -1212,7 +1133,7 @@ with page_admin:
                 new_role=st.selectbox("Role",["Admin","Standard user","Bartenders"])
                 confirmed=st.form_submit_button("Reset password and role")
             if confirmed:
-                if not store.writable:st.error("Connect Google Sheets to save")
+                if not store.writable:st.error("Connect GitHub to save")
                 elif len(new_password)<10:st.error("Use at least 10 characters")
                 else:
                     user_rows=records(SHEET_NAMES["users"])
@@ -1229,7 +1150,7 @@ with page_admin:
                 with u3:new_user_role=st.selectbox('New user role',['Bartenders','Standard user','Admin'])
                 add_account=st.form_submit_button('Create user')
             if add_account:
-                if not store.writable:st.error('Connect live Google Sheets to create users')
+                if not store.writable:st.error('Connect live GitHub to create users')
                 elif not username_new.strip() or len(new_user_password)<10:
                     st.error('Provide a username and a temporary password of at least 10 characters.')
                 elif any(str(x.get('username','')).strip().casefold()==username_new.strip().casefold() for x in all_users):
@@ -1248,4 +1169,4 @@ with page_admin:
             if issues:
                 for issue in issues:st.warning(issue)
             else:st.success("All ingredient IDs used by recipe cells match the Ingredients master.")
-            st.caption("Data sheets: "+", ".join(SHEET_NAMES.values()))
+            st.caption("GitHub JSON tables: "+", ".join(SHEET_NAMES.values()))

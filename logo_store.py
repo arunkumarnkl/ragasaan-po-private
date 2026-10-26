@@ -2,7 +2,6 @@
 from __future__ import annotations
 from pathlib import Path
 import os
-from urllib.request import Request, urlopen
 
 ROOT=Path(__file__).resolve().parent
 ASSETS=ROOT/'assets'  # legacy per-version location
@@ -10,8 +9,6 @@ ASSETS=ROOT/'assets'  # legacy per-version location
 APPDATA=Path(os.environ.get('LOCALAPPDATA',str(Path.home()/'.local'/'share')))
 PERSISTENT_ASSETS=APPDATA/'Ragasaan_PO'/'assets'
 LOGO_PATH=PERSISTENT_ASSETS/'ragasaan_logo.png'
-REMOTE_URL='https://drive.google.com/uc?export=view&id=1ggVYW2TF97BYp4JbmABYJA1bE8-ryyno'
-_ATTEMPTED=False
 
 
 def _image_type(data:bytes)->str:
@@ -45,16 +42,7 @@ def clear_logo()->None:
             (folder/name).unlink(missing_ok=True)
 
 
-def load_default_logo(try_remote:bool=True)->bytes|None:
-    global _ATTEMPTED
+def load_default_logo(try_remote: bool = False) -> bytes | None:
+    """Local legacy logo fallback; cloud persistence is handled via GitHub."""
     f=saved_logo_path()
-    if f:return f.read_bytes()
-    if not try_remote or _ATTEMPTED:return None
-    _ATTEMPTED=True
-    try:
-        with urlopen(Request(REMOTE_URL,headers={'User-Agent':'Mozilla/5.0'}),timeout=4) as r:
-            body=r.read(4_000_001)
-        save_logo(body)
-        return body
-    except (OSError,ValueError):
-        return None
+    return f.read_bytes() if f else None
